@@ -67,29 +67,68 @@ export class World {
         this.underwaterFogColor = 0x001e0f;
         this.scene.fog = new THREE.FogExp2(this.defaultFogColor, 0.0025); 
 
-        // --- MAP DATA SYNC (Column 11) ---
-        // Determine Seed
-        let seed = 12345;
+        // --- DATABASE SYNC (Collections) ---
+        // 1. Setup User Info
         const currentUser = await window.websim.getCurrentUser();
         const createdBy = await window.websim.getCreatedBy();
         const isHost = currentUser && createdBy && currentUser.username === createdBy.username;
+        this.currentUser = currentUser; 
 
-        if (this.room.roomState.column11 && this.room.roomState.column11.seed) {
-            seed = this.room.roomState.column11.seed;
-            console.log("Loaded seed from roomState:", seed);
-        } else if (isHost) {
-            seed = Math.floor(Math.random() * 100000);
-            this.room.updateRoomState({
-                column11: {
-                    seed: seed,
-                    generatedBy: currentUser.username,
-                    timestamp: Date.now()
-                }
-            });
-            console.log("Host generated new seed:", seed);
+        // 2. Fetch/Create Records
+        const collection = this.room.collection('players');
+        let records = await collection.getList();
+        
+        // Find Creator's Record (For Map Data / Column 11)
+        let creatorRecord = records.find(r => r.username === createdBy.username);
+        
+        let seed = 12345;
+        let mapData = null;
+
+        if (creatorRecord && creatorRecord.column11 && creatorRecord.column11.seed) {
+            mapData = creatorRecord.column11;
+            seed = mapData.seed;
+            console.log("Loaded seed from Database (Creator's Row):", seed);
         } else {
-            console.log("Waiting for host seed, using default for now...");
+            console.log("No existing map data found in DB.");
+            if (isHost) {
+                seed = Math.floor(Math.random() * 100000);
+                mapData = { seed: seed, generated: Date.now() };
+                console.log("Host generated new seed:", seed);
+            }
         }
+
+        // Find My Record (For Player Data / Column 1)
+        let myRecord = records.find(r => r.username === currentUser.username);
+
+        if (!myRecord) {
+            console.log("Creating new DB row for user:", currentUser.username);
+            const initialData = {
+                column1: { x: 0, y: 100, z: 0 }, 
+                // Empty columns 2-10 as requested
+                column2: {}, column3: {}, column4: {}, column5: {},
+                column6: {}, column7: {}, column8: {}, column9: {}, column10: {}
+            };
+            
+            if (isHost && mapData) {
+                initialData.column11 = mapData;
+            }
+
+            try {
+                myRecord = await collection.create(initialData);
+            } catch (e) {
+                console.error("Error creating record:", e);
+                // Fallback if create fails (e.g. race condition), try fetch again
+                records = await collection.getList();
+                myRecord = records.find(r => r.username === currentUser.username);
+            }
+        } else {
+            // If I am host and map data is new/updated, save it to my existing record
+            if (isHost && mapData && (!myRecord.column11 || myRecord.column11.seed !== seed)) {
+                await collection.update(myRecord.id, { column11: mapData });
+            }
+        }
+
+        this.myRecordId = myRecord ? myRecord.id : null;
 
         // Components
         this.sky = new SkySystem(this.scene, this.renderer);
@@ -135,9 +174,27 @@ export class World {
         // Player & Camera Setup
         this.player = new Player(this.scene, false);
         
-        // Find safe starting spot (center of map)
-        const startY = this.getTerrainHeight(0, 0);
-        this.player.position.set(0, startY + 5, 0);
+        // Restore position from DB if available
+        let posRestored = false;
+        if (myRecord && myRecord.column1 && myRecord.column1.x !== undefined) {
+            const { x, y, z, rot } = myRecord.column1;
+            // Validate coords (avoid NaN)
+            if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                this.player.position.set(x, y, z);
+                this.player.rotation = rot || 0;
+                posRestored = true;
+            }
+        } 
+        
+        if (!posRestored) {
+            // Default Start
+            const startY = this.getTerrainHeight(0, 0);
+            this.player.position.set(0, startY + 5, 0);
+        }
+        
+        // Sync mesh immediately
+        this.player.mesh.position.copy(this.player.position);
+        this.player.mesh.rotation.y = this.player.rotation;
 
         this.networkPlayers = new NetworkPlayers(this.scene, this.room);
 
@@ -281,7 +338,7 @@ export class World {
             // Pass terrain height lookup function so player can check height
             this.player.update(delta, (x, z) => this.getTerrainHeight(x, z), this.camera);
             
-            // Broadcast Presence (Column 1)
+            // 1. Broadcast Realtime Presence (Column 1) - High Frequency
             this.presenceTimer += delta;
             if (this.presenceTimer > 0.05) { // 20Hz update
                 this.presenceTimer = 0;
@@ -298,6 +355,23 @@ export class World {
                         state: isSwimming ? 'swim' : 'idle'
                     }
                 });
+            }
+
+            // 2. Save to Database (Persistence) - Low Frequency
+            // This satisfies "each user gets 1 row" for persistent data
+            this.dbTimer = (this.dbTimer || 0) + delta;
+            if (this.dbTimer > 4.0) { // Save every 4 seconds
+                this.dbTimer = 0;
+                if (this.myRecordId) {
+                     this.room.collection('players').update(this.myRecordId, {
+                        column1: {
+                            x: this.player.position.x,
+                            y: this.player.position.y,
+                            z: this.player.position.z,
+                            rot: this.player.rotation
+                        }
+                    }).catch(e => console.warn("DB Auto-save failed", e));
+                }
             }
 
             // Update camera with terrain mesh for collision
