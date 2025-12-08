@@ -332,7 +332,9 @@ export class World {
         if (this.atmosphere) this.atmosphere.update(time);
         
         // Sync Network Players
-        if (this.networkPlayers) this.networkPlayers.update(delta);
+        if (this.networkPlayers) {
+            this.networkPlayers.update(delta, this.player ? this.player.position : null);
+        }
 
         if (this.player && this.cameraController) {
             // Pass terrain height lookup function so player can check height

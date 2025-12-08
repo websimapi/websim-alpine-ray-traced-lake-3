@@ -9,7 +9,7 @@ export class NetworkPlayers {
         this.lastUpdate = 0;
     }
 
-    update(dt) {
+    update(dt, localPlayerPos) {
         // 1. Manage Peers
         const peers = this.room.peers;
         const connectedIds = new Set(Object.keys(peers));
@@ -30,15 +30,19 @@ export class NetworkPlayers {
             
             // Spawn if new
             if (!remotePlayer) {
-                remotePlayer = new Player(this.scene, true); // true = isRemote
-                // Add nametag? 
+                const peer = peers[id] || {};
+                const userData = {
+                    username: peer.username || "Player",
+                    avatarUrl: peer.avatarUrl
+                };
+                remotePlayer = new Player(this.scene, true, userData);
                 this.players.set(id, remotePlayer);
             }
 
             // Get data from presence (Column 1 as requested)
             const presence = this.room.presence[id];
             if (presence && presence.column1) {
-                remotePlayer.updateRemote(dt, presence.column1);
+                remotePlayer.updateRemote(dt, presence.column1, localPlayerPos);
             }
         }
     }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 export class Player {
-    constructor(scene, isRemote = false) {
+    constructor(scene, isRemote = false, userData = {}) {
         this.scene = scene;
         this.isRemote = isRemote;
         this.position = new THREE.Vector3(0, 100, 0); 
